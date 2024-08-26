@@ -1,0 +1,97 @@
+---
+title: "Untitled"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+## R Markdown
+#/Users/connorking/Desktop/test/
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+library(Seurat)
+library(SeuratData)
+library(SPARK)
+library(spatialDE)
+set.seed(1999)
+
+```
+
+
+
+
+```{r}
+
+# load breast cancer data downloaded from SpatialDE
+Rep11_MOB_0 <- read.csv("layer2_BC_count_matrix-1.csv", header = T)
+rownames(Rep11_MOB_0) <- Rep11_MOB_0$X
+Rep11_MOB_0 <- t(Rep11_MOB_0[,-1])
+
+
+# remove all genes with less than 3 transcripts
+Rep11_MOB_0 <- Rep11_MOB_0[rowSums(Rep11_MOB_0) >= 3, ]
+dim(Rep11_MOB_0)
+rawcount <- Rep11_MOB_0
+```
+counts_brain <- GetAssayData(brain, assay = "Spatial")
+expressed_genes<- which(rowSums(counts_brain) > (sum(rowSums(counts_brain)) * 0.000001))
+
+
+```{r}
+# Create dataframe with x and y coordinates and total counts
+info <- cbind.data.frame(
+x=as.numeric(sapply(strsplit(colnames(rawcount),split="x"),"[",1)), y=as.numeric(sapply(strsplit(colnames(rawcount),split="x"),"[",2)),
+total_counts=apply(rawcount,2,sum)
+)
+
+rownames(info) <- colnames(rawcount)
+```
+
+
+```{r}
+# create SPARK object from coordinates and rawcount
+spark <- CreateSPARKObject(counts=rawcount, 
+                             location=info[,1:2],
+                             percentage = 0.1, 
+                             min_total_counts = 10)
+
+# total counts for each cell/spot
+spark@lib_size <- apply(spark@counts, 2, sum)
+
+```
+
+```{r}
+# fitting data to model
+spark <- spark.vc(spark, 
+                   covariates = NULL, 
+                   lib_size = spark@lib_size, 
+                   num_core = 3,
+                   verbose = F)
+```
+
+
+```{r}
+# Calculating pval
+spark <- spark.test(spark, 
+                     check_positive = T, 
+                     verbose = F)
+```
+
+
+```{r}
+# remove genes with pvalue less than .05
+results <- spark@res_mtest[spark@res_mtest$adjusted_pvalue < .05,]
+```
+
+
+```{r}
+# save results to csv
+write.csv(results, "spatially_variable_genes.csv")
+```
+

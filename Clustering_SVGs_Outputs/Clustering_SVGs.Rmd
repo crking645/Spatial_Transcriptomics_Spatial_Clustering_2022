@@ -1,0 +1,369 @@
+s---
+title: "Untitled"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+library(Seurat)
+library(ggplot2)
+library(sigclust)
+library(MultiK)
+library(spatialDE)
+library(SeuratData)
+library(glue)
+set.seed(1999)
+```
+
+```{r}
+
+#import the data downloaded from
+
+Rep11_MOB_0 <- read.csv("layer2_BC_count_matrix-1.csv", header = T)
+rownames(Rep11_MOB_0) <- Rep11_MOB_0$X
+Rep11_MOB_0 <- t(Rep11_MOB_0[,-1])
+
+
+#Select only genes that are expressed greater than 3 transcripts in the entire dataset
+
+Rep11_MOB_0 <- Rep11_MOB_0[rowSums(Rep11_MOB_0) >= 3, ]
+```
+
+
+```{r}
+# create seurat object
+bc_seur <- CreateSeuratObject(Rep11_MOB_0, assay = "Spatial")
+
+# Normalize data.
+bc_seur <- NormalizeData(bc_seur)
+```
+
+
+```{r}
+# read in spatially variable genes for dataset
+results <- read.csv("spatially_variable_genes.csv")
+```
+
+
+```{r}
+#extract data
+norm_exp <- data.frame(bc_seur@assays[["Spatial"]]@data)
+```
+
+```{r}
+#subset to only include genes spatially variable in dataset
+bc_seur_svgs <- subset(bc_seur, features = results$X)
+```
+
+
+```{r}
+# grab the names of genes
+all.genes <- rownames(bc_seur_svgs )
+
+# scaledata
+bc_seur_svgs  <- ScaleData(bc_seur_svgs , features = results$X)
+```
+
+```{r}
+# subset normalized data for only spatially variable genes in dataset and transpose dataframe
+x <- t(norm_exp[results$X,])
+```
+
+
+```{r}
+# create Seurat object from the transposed dataframe
+gene.seur <- CreateSeuratObject(x)
+```
+
+```{r}
+# grab spot names
+all.spots <- rownames(gene.seur)
+
+#invert scale data
+scale <- t(bc_seur_svgs@assays$Spatial@scale.data)
+rownames(scale) <- all.spots
+
+# add inverted scale data to gene dataset
+gene.seur <- SetAssayData(gene.seur, assay = "RNA", slot = "scale.data", new.data = scale)
+
+gene.seur <- FindVariableFeatures(gene.seur)
+
+# run PCA
+gene.seur <- RunPCA(gene.seur, features = all.spots)
+
+# elbowplot to determine optimal number of dims
+ElbowPlot(gene.seur)
+
+# save elbowplot
+ggsave("all_elbowplot.tiff", device = grDevices::tiff)
+```
+
+
+
+
+
+```{r}
+#finding clusters and creating tsne for visualization
+gene.seur <- FindNeighbors(gene.seur, reduction = "pca", dims = 1:8, nn.method = "annoy")
+gene.seur <- FindClusters(gene.seur, verbose = FALSE)
+gene.seur <- RunTSNE(gene.seur, reduction = "pca", dims = 1:8,  check_duplicates = FALSE)
+```
+
+```{r}
+DimPlot(gene.seur, reduction = "tsne", pt.size = .5, label = T)
+```
+
+```{r}
+saveRDS(gene.seur, "all_multiK_clusters.RDS")
+```
+
+```{r}
+gene.seur <- readRDS("all_multiK_clusters.RDS")
+```
+
+
+
+
+
+
+
+
+
+
+ggsave("/Volumes/cvmbs/RSTOR-IMPAc-TB/Pathology/Manuscripts/Pre-pilot_manuscript/Data/Spatial\ Transcriptomics/Spatial_Pattern_All_2_15_2022/MultiK_SDE/all_elbowplot.tiff")
+
+```{r}
+#this is the altered multik function for spatial analysis.
+
+MultiK <- function(seu, resolution = seq(0.05, 2, 0.05), nPC = 30, reps = 100, pSample = 0.8, seed = NULL) {
+  # setting seed for reproducibility
+  if (is.null(seed) == TRUE) {
+    seed <- timeSeed <- as.numeric(Sys.time())
+  }
+  set.seed(seed)
+
+  # step 1: subsampling
+  subcol <- list()
+  for (i in 1: reps) {
+    subcol[[i]] <- sample(x=ncol(seu), size=round(ncol(seu) * pSample), replace=FALSE)
+  }
+
+  # step 2: loop over subsampling runs, with each run subsampling 80% of cells, reselect genes for clustering
+  clusters <- list()
+  messages <- c()
+  ks <- c()
+  count <- 1
+
+  suppressPackageStartupMessages(library(Seurat))
+
+  for(i in 1: reps) {
+
+    print(paste("Rep: ", i, sep=""))
+    # subsample the columns (the cells) from the full matrix
+    sub_seu <- seu[, subcol[[i]] ]
+
+    # normalizing the data
+    #subX <- NormalizeData(object = subX, normalization.method = "LogNormalize", scale.factor = 10000, verbose=F)
+
+    sub_seu <- FindVariableFeatures(object = sub_seu, selection.method = "vst", nfeatures = 2000,
+                                 loess.span = 0.3, clip.max = "auto",
+                                 num.bin = 20, binning.method = "equal_width", verbose = F)
+    # Scaling unwanted variation
+    all.cells <- substr(colnames(sub_seu),1,16)
+    sub_seu <- ScaleData(object = sub_seu, features = rownames(sub_seu), verbose=F)
+
+    res_norm <- t(norm_exp[rownames(x = sub_seu),])
+    
+    rownames(res_norm) <-substr(rownames(res_norm),1,16)
+    rownames(res_norm) <- gsub("X", "", rownames(res_norm))
+    res_norm <- res_norm[all.cells,]
+    
+    subX <- CreateSeuratObject(res_norm)
+    
+    all.spots <- rownames(subX)
+    
+    scale <- t(sub_seu@assays$Spatial@scale.data)
+    
+    rownames(scale) <- all.spots
+    
+    subX <- SetAssayData(subX, assay = "RNA", slot = "scale.data", new.data = scale)
+    
+    subX <- RunPCA(object = subX, features = all.spots, npcs = 50, verbose=F)
+    # Run Clustering
+    subX <- FindNeighbors(object = subX,
+                          k.param = 20, # default is 20-nearest neighbors
+                          reduction = "pca", dims = 1: nPC, verbose=F)
+
+    for (res in resolution) {
+      print(paste("Rep", i, "Res", res, sep=" "))
+      subX <- FindClusters(subX, resolution = res, verbose = F)
+      subX.clusters <- Idents(subX)
+      clusters[[count]] <- subX.clusters
+      messages <- c(messages, paste("Rep_", i, "_res_", res, sep = ""))
+      count <- count + 1
+      ks <- c(ks, length(unique(subX.clusters)))
+    }
+    names(clusters) <- messages
+
+  }
+
+  # step 3: calculate consensus matrix across subsampling runs for each unique K
+  res_norm <- t(norm_exp[rownames(x = seu),])
+  seu <- CreateSeuratObject(res_norm)
+  mInit <- matrix(0, ncol = ncol(seu), nrow = ncol(seu))
+
+  ml <- list()
+  res <- list()
+  all.clusters.by.K <- list()
+  m.count <- list()
+  unique.ks <- unique(ks)[order(unique(ks))]
+
+  count.k <- 1
+  for(k in unique.ks) {
+    print(paste("k =", k, sep=" "))
+    idx <- which(ks == k)
+    cluster.k <- clusters[idx]
+    all.clusters.by.K[[count.k]] <- cluster.k
+
+    for (s in 1: length(cluster.k) ) {
+      print(paste("run", s, sep = ""))
+      sampleKey <- as.numeric(sapply(names(cluster.k[[s]]), function(x){which(colnames(seu) == x)}))
+      if (s == 1){
+        ml[[count.k]] <- connectivityMatrix(cluster.k[[s]], mInit, sampleKey)
+        m.count[[count.k]] <- connectivityMatrix(rep(1, length(sampleKey)), mInit, sampleKey)
+      }else{
+        ml[[count.k]] <- connectivityMatrix(cluster.k[[s]], ml[[count.k]], sampleKey)
+        m.count[[count.k]] <- connectivityMatrix(rep(1, length(sampleKey)), m.count[[count.k]], sampleKey)
+      }
+    }
+
+    res[[count.k]] <- triangle(ml[[count.k]], mode = 3)/triangle(m.count[[count.k]], mode = 3)
+    res[[count.k]][which(triangle(m.count[[count.k]], mode = 3) == 0)] = 0
+    print(paste(k, " finished", sep = ""))
+    count.k <- count.k + 1
+  }
+
+  return(list("consensus" = res, "k" = ks))
+}
+```
+
+
+
+
+
+
+```{r, echo=FALSE, include = FALSE, message=FALSE,results='hide'}
+# increase amount of storage that R can access for the run
+options (future.globals.maxSize = 4000000000000000000000)
+
+# run MiltiK function
+multik<- MultiK(bc_seur_svgs, reps=100 , nPC = 8, seed = 1999, resolution = seq(0.05, 2, .05))
+```
+
+```{r}
+# save multik outputs
+
+saveRDS(multik, "multik.RDS")
+```
+
+
+
+```{r}
+# this is for determining if clusters are true clusters or subclusters. Not very useful for us because our data is not very pretty like how single cell is.
+
+# plot and save the plot of the multik results
+DiagMultiKPlot(multik$k, multik$consensus)
+ggsave("all_multi.tiff", device = grDevices::tiff)
+```
+
+
+
+
+
+
+```{r}
+#this is for generating clusters based on how many we determined was optimal
+#This is here because I changed the nPC parameter to 8 instead of 30 like the default is because that is the number of dms we decided.
+
+getClusters <- function(seu, optK) {
+  suppressPackageStartupMessages(library(Seurat))
+  all.genes <- rownames(seu)
+  seu <- RunPCA(object = seu, features =  all.genes, verbose=F)
+  # Run Clustering
+  k.param <- 20
+  nPC <- 8
+  seu <- FindNeighbors(object = seu, k.param = k.param, dims = 1: nPC, verbose = FALSE, reduction = "pca", nn.method = "rann")
+  resolution <- seq(0.05, 2, by = 0.05)
+  seu <- FindClusters(seu, resolution = resolution, verbose = F) 
+  meta.data <- seu@meta.data[, grep("RNA_snn_res.", colnames(seu@meta.data)) ]
+  ks <- apply(meta.data, 2, function(x) length(table(x)))
+  clusters <- matrix(NA, nrow=ncol(seu), ncol=length(optK))
+  colnames(clusters) <- paste("K", optK, sep="_")
+  rownames(clusters) <- rownames(meta.data)
+  res <- c()
+
+  for (i in 1: length(optK)) {
+    #print(optK[i])
+    # first find out if optK exist in the range of tested resolution, if yes, use the first occurence
+    if ( any(optK[i]==ks) ) {
+      clusters[, i] <- as.numeric(as.character(meta.data[, which(ks==optK[i])[1]]))
+      res[i] <- gsub("RNA_snn_res.", "", names(which(ks==optK[i])[1]))
+    }
+    else {
+      # optK not exist in the range of test resolution, find the small window
+      res[i] <- findResol(seu, ks, optK[i])
+      seu <- FindClusters(seu, resolution = res[i], verbose = F)
+      clusters[, i] <- as.numeric(as.character(seu@meta.data$seurat_clusters))
+    }
+  }
+  names(res) <- paste("K", optK, sep="_")
+  return(list("clusters"=clusters, "resolution"=res))
+}
+```
+
+```{r} 
+# 3 is the optimal clusters
+clusters <- getClusters(gene.seur, 3)
+```
+
+```{r}
+# transfer cluster names to object
+Idents(gene.seur) <- clusters$clusters
+gene.seur@meta.data$MultiK_clusters <- clusters$clusters
+```
+
+```{r}
+# save labeled cluster object
+saveRDS(gene.seur, "all_multiK_clusters.RDS")
+```
+
+
+
+```{r}
+gene.seur <- readRDS("all_multiK_clusters.RDS")
+```
+
+```{r}
+# save gene association with cluster
+write.csv(gene.seur@meta.data$MultiK_clusters,"all_gene_clusters.csv")
+```
+
+
+```{r}
+# tsne plot of gene clusters
+DimPlot(gene.seur, reduction = "tsne", pt.size = .5, label = T) + labs(color='Cluster') 
+ggsave("all_MultiK_tsne.tiff", device = grDevices::tiff)
+```
+
+
+
